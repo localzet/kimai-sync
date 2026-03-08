@@ -1,0 +1,147 @@
+name: Production Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - development
+          - production
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=latest-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-stream-relay:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Stream Relay
+        id: meta-relay
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-relay,onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=latest-
+
+      - name: Build and push Stream Relay Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./stream-relay/
+          file: ./stream-relay/Dockerfile
+          push: true
+          tags: ${{ steps.meta-relay.outputs.tags }}
+          labels: ${{ steps.meta-relay.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [build, build-stream-relay]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger Portainer Webhook
+        run: |
+          ENV=${{ github.event.inputs.environment || 'production' }}
+          WEBHOOK_URL="${{ secrets.PORTAINER_WEBHOOK }}"
+
+          echo "Пингуем Portainer webhook для обновления сервиса..."
+                    
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "PORTAINER_WEBHOOK не установлен"
+            echo "Пропускаем deploy (webhook не настроен)"
+            exit 0
+          fi
+          
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o response.txt -X POST "$WEBHOOK_URL")
+          RESPONSE=$(cat response.txt)
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $RESPONSE"
+          
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "204" ]; then
+            echo "Webhook успешно вызван ($HTTP_CODE)"
+            echo "Portainer обновит сервис автоматически"
+          else
+            echo "Webhook вернул статус $HTTP_CODE"
+            echo "Убедись что webhook правильно настроен"
+          fi
