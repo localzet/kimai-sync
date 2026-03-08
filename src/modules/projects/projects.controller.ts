@@ -35,7 +35,7 @@ export class ProjectsController {
       });
 
       return Promise.all(
-        projects.map(async (project) => {
+        projects.map(async (project: any) => {
           const synced = await this.prisma.timeEntry.count({
             where: {
               projectId: project.id,
