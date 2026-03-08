@@ -1,0 +1,246 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Project Model - Maps Kimai projects to Notion databases
+// Represents a Kimai project and its Notion database mapping.
+// Each project can have multiple time entries synced to a corresponding Notion database.
+// ============================================================================
+model Project {
+    id Int @id @default(autoincrement())
+
+    // Kimai project identifier (unique to prevent duplicates)
+    kimaiId Int @unique(map: "Project_kimaiId_key") @db.Integer
+
+    // Project metadata from Kimai
+    name        String  @db.VarChar(255)
+    description String? @db.Text
+
+    // Notion database configuration
+    notionDatabaseId  String? @db.Uuid
+    notionDatabaseUrl String? @db.Text
+    notionEnabled     Boolean @default(true)
+
+    // Notion template configuration (propertyMap as JSON)
+    notionTemplate    Json?   @db.JsonB
+
+    // Project status tracking
+    isActive Boolean @default(true)
+
+    // Timestamps
+    createdAt    DateTime  @default(now()) @db.Timestamp(3)
+    updatedAt    DateTime  @updatedAt @db.Timestamp(3)
+    lastSyncedAt DateTime? @db.Timestamp(3)
+
+    // Relations
+    timeEntries TimeEntry[]
+
+    // Indexes for common queries
+    @@index([kimaiId])
+    @@index([notionDatabaseId])
+    @@index([isActive])
+    @@index([createdAt])
+    // Compound index for filtering active projects by creation date
+    @@index([isActive, createdAt])
+}
+
+// ============================================================================
+// TimeEntry Model - Stores Kimai time entries with sync tracking
+// Represents a time entry from Kimai with complete sync tracking information.
+// This model supports:
+// - Idempotent upsert by kimaiId (safe to re-run sync multiple times)
+// - Efficient weekly sync queries (filter by date range and synced status)
+// - Notion page linking (one time entry = one Notion page)
+// - Full audit trail (createdAt, updatedAt, syncedAt)
+// ============================================================================
+model TimeEntry {
+    id Int @id @default(autoincrement())
+
+    // =========================================================================
+    // Kimai identifiers (for upsert support)
+    // =========================================================================
+
+    // Kimai time entry ID (unique across Kimai instance)
+    // Used as the primary key for idempotent upserts
+    kimaiId Int @unique(map: "TimeEntry_kimaiId_key") @db.Integer
+
+    // Project relationship
+    projectId Int
+    project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+    // =========================================================================
+    // Time entry metadata from Kimai
+    // =========================================================================
+
+    // Activity/task name
+    activity String @db.VarChar(255)
+
+    // Optional description
+    description String? @db.Text
+
+    // Tags/categories if applicable
+    tags String? @db.VarChar(255)
+
+    // =========================================================================
+    // Time tracking data (in UTC)
+    // =========================================================================
+
+    // Start time (ISO 8601, stored in UTC)
+    begin DateTime @db.Timestamp(3)
+
+    // End time (ISO 8601, stored in UTC)
+    // Nullable because entries might be ongoing
+    end DateTime? @db.Timestamp(3)
+
+    // Duration in seconds (denormalized for query efficiency)
+    // Calculated as: (end - begin) in seconds
+    // Range: 0 to ~8.6 billion (covers centuries of work)
+    duration Int @default(0)
+
+    // =========================================================================
+    // Sync tracking
+    // =========================================================================
+
+    // Whether this entry has been synced to the Notion database
+    synced Boolean @default(false)
+
+    // Timestamp of the last successful Notion sync
+    // Null if never synced or sync failed
+    syncedAt DateTime? @db.Timestamp(3)
+
+    // =========================================================================
+    // Notion integration
+    // =========================================================================
+
+    // Notion page ID where this entry is stored
+    // Set after successful sync to Notion
+    notionPageId String? @db.Uuid
+
+    // Notion page URL for quick access
+    notionPageUrl String? @db.Text
+
+    // =========================================================================
+    // Audit trail
+    // =========================================================================
+
+    // When this record was first created (from sync)
+    createdAt DateTime @default(now()) @db.Timestamp(3)
+
+    // When this record was last modified (either from Kimai update or local sync)
+    updatedAt DateTime @updatedAt @db.Timestamp(3)
+
+    // Indexes for performance
+    // Filter by project (list all entries for a project)
+    @@index([projectId])
+    // Filter by sync status (find entries needing sync)
+    @@index([synced])
+    // Filter by date range (weekly sync queries)
+    @@index([begin])
+    // Compound index for weekly sync operations
+    @@index([synced, begin])
+    // Compound index for project-specific date range queries
+    @@index([projectId, begin])
+    // Compound index for finding entries awaiting sync in a date range
+    @@index([synced, begin, projectId])
+    // Index for Notion sync operations
+    @@index([notionPageId])
+    // Compound for finding synced entries (audit/verification)
+    @@index([synced, syncedAt])
+    // Index for created at (useful for pagination, newest first)
+    @@index([createdAt])
+}
+
+// ============================================================================
+// Activity Model - Stores Kimai activities for reference
+// Activities are cached from Kimai to provide clean names in Notion
+// ============================================================================
+model Activity {
+    id Int @id @default(autoincrement())
+
+    // Kimai activity identifier (unique to prevent duplicates)
+    kimaiId Int @unique(map: "Activity_kimaiId_key") @db.Integer
+
+    // Activity name from Kimai
+    name String @db.VarChar(255)
+
+    // Activity status in Kimai
+    isActive Boolean @default(true)
+
+    // Timestamps for tracking
+    createdAt DateTime @default(now()) @db.Timestamp(3)
+    updatedAt DateTime @updatedAt @db.Timestamp(3)
+
+    // Indexes for common queries
+    @@index([kimaiId])
+    @@index([isActive])
+}
+
+// ============================================================================
+// Index Strategy Summary
+// ============================================================================
+// QUERY PATTERNS AND THEIR INDEXES:
+//
+// 1. Idempotent Upsert (most common):
+//    upsert({ where: { kimaiId }, update: {...}, create: {...} })
+//    Uses: @@unique([kimaiId])
+//
+// 2. Weekly Sync - Find unsync'd entries:
+//    SELECT * FROM TimeEntry
+//    WHERE synced = false AND begin >= $weekStart AND begin < $weekEnd
+//    Uses: @@index([synced, begin])
+//
+// 3. Weekly Sync - Project filtered:
+//    SELECT * FROM TimeEntry
+//    WHERE projectId = $id AND synced = false AND begin >= $start AND begin < $end
+//    Uses: @@index([synced, begin, projectId])
+//
+// 4. List entries for a project:
+//    SELECT * FROM TimeEntry WHERE projectId = $id ORDER BY begin DESC
+//    Uses: @@index([projectId]) + @@index([begin])
+//
+// 5. Find entry by Kimai ID:
+//    SELECT * FROM TimeEntry WHERE kimaiId = $id
+//    Uses: @@unique([kimaiId])
+//
+// 6. Find entry by Notion Page ID:
+//    SELECT * FROM TimeEntry WHERE notionPageId = $id
+//    Uses: @@index([notionPageId])
+//
+// 7. Count unsynced entries:
+//    SELECT COUNT(*) FROM TimeEntry WHERE synced = false
+//    Uses: @@index([synced])
+//
+// 8. Pagination (newest first):
+//    SELECT * FROM TimeEntry WHERE projectId = $id ORDER BY createdAt DESC LIMIT $limit
+//    Uses: @@index([projectId]) + @@index([createdAt])
+
+// ============================================================================
+// Constraints Summary
+// ============================================================================
+// DATA INTEGRITY:
+//
+// 1. Cascading Deletes:
+//    - When a Project is deleted, all its TimeEntry records are deleted
+//    - Uses: @relation(..., onDelete: Cascade)
+//
+// 2. Referential Integrity:
+//    - projectId must always reference a valid Project
+//    - Enforced by: @relation(..., fields: [projectId], references: [id])
+//
+// 3. Unique Identifiers:
+//    - kimaiId is unique for both Project and TimeEntry (no duplicates)
+//    - Enables idempotent upserts by kimaiId
+//
+// 4. Domain Constraints:
+//    - duration >= 0 (no negative durations)
+//    - synced: boolean flag (clear sync status)
+//    - begin <= end (time range validation in application layer)

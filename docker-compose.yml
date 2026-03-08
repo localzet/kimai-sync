@@ -1,0 +1,87 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kimai-sync-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-kimai_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kimai_password}
+      POSTGRES_DB: ${DB_NAME:-kimai_sync}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kimai-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kimai_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: kimai-sync-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - kimai-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kimai-sync-app
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      APP_PORT: ${APP_PORT:-3000}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-kimai_user}
+      DB_PASSWORD: ${DB_PASSWORD:-kimai_password}
+      DB_NAME: ${DB_NAME:-kimai_sync}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
+      KIMAI_URL: ${KIMAI_URL}
+      KIMAI_API_KEY: ${KIMAI_API_KEY}
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-log}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - kimai-network
+    restart: unless-stopped
+    # Uncomment for development
+    # volumes:
+    #   - ./src:/app/src
+    #   - ./dist:/app/dist
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  kimai-network:
+    driver: bridge
