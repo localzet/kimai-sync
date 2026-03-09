@@ -21,6 +21,9 @@ RUN npm prune --omit=dev
 # Production stage
 FROM node:22-alpine
 
+# Install OpenSSL for Prisma compatibility
+RUN apk add --no-cache openssl
+
 WORKDIR /app
 
 # Copy built application from builder
