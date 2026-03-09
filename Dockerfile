@@ -3,8 +3,6 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x,linux-musl-arm64-openssl-3.0.x
-
 # Copy dependency manifests
 COPY package*.json ./
 COPY prisma ./prisma
@@ -24,10 +22,6 @@ RUN npm prune --omit=dev
 FROM node:22-alpine
 
 WORKDIR /app
-
-ENV LD_PRELOAD=/usr/lib/libjemalloc.so.2
-ENV PRISMA_HIDE_UPDATE_MESSAGE=true
-ENV PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1
 
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
