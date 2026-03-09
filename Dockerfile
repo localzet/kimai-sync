@@ -31,8 +31,8 @@ ENV PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1
 
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /opt/app/prisma ./prisma
-COPY --from=builder /opt/app/node_modules ./node_modules
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/node_modules ./node_modules
 
 # Copy Prisma schema for runtime
 COPY package*.json ./
