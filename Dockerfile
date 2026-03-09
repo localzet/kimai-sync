@@ -21,8 +21,8 @@ RUN npm prune --omit=dev
 # Production stage
 FROM node:22-alpine
 
-# Install OpenSSL for Prisma compatibility
-RUN apk add --no-cache openssl
+# Install OpenSSL and CA certificates for Prisma compatibility
+RUN apk add --no-cache openssl ca-certificates
 
 WORKDIR /app
 
