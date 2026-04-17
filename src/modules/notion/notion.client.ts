@@ -21,7 +21,7 @@ export class NotionClient {
 
   private getHeaders(): Record<string, string> {
     return {
-      'Authorization': `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${this.apiKey}`,
       'Notion-Version': this.notionVersion,
       'Content-Type': 'application/json',
     };
@@ -44,7 +44,7 @@ export class NotionClient {
     }
   }
 
-  async updatePage(pageId: string, payload: any): Promise<any> {
+  async updatePage(pageId: string, payload: Record<string, any>): Promise<any> {
     try {
       const response = await firstValueFrom(
         this.http.patch(`https://api.notion.com/v1/pages/${pageId}`, payload, {
@@ -58,6 +58,26 @@ export class NotionClient {
       const message = axiosError.response?.data?.message || 'Failed to update page';
       throw new NotionError(message, statusCode, axiosError as Error);
     }
+  }
+
+  async getPage(pageId: string): Promise<any> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get(`https://api.notion.com/v1/pages/${pageId}`, {
+          headers: this.getHeaders(),
+        }),
+      );
+      return response.data;
+    } catch (error: unknown) {
+      const axiosError = error as any;
+      const statusCode = axiosError.response?.status;
+      const message = axiosError.response?.data?.message || 'Failed to fetch page';
+      throw new NotionError(message, statusCode, axiosError as Error);
+    }
+  }
+
+  async archivePage(pageId: string): Promise<any> {
+    return this.updatePage(pageId, { archived: true });
   }
 
   async getDatabase(databaseId: string): Promise<any> {
@@ -94,7 +114,6 @@ export class NotionClient {
       const statusCode = axiosError.response?.status;
       const message = axiosError.response?.data?.message || 'Failed to query database';
       this.logger.error(`❌ Notion query error (${statusCode}): ${message}`);
-      // Return empty array on error instead of throwing to avoid blocking sync
       return [];
     }
   }

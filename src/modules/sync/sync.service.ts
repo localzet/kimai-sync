@@ -4,7 +4,7 @@ import { KimaiService } from '@modules/kimai/kimai.service';
 import { PrismaService } from '@modules/database/prisma.service';
 import { NotionService } from '@modules/notion/notion.service';
 import type { KimaiTimeEntry } from '../../types/kimai.types';
-import { SyncResult, TimeEntrySyncPayload, SyncError } from '../../types/sync.types';
+import { SyncResult, SyncError } from '../../types/sync.types';
 
 @Injectable()
 export class SyncService {
@@ -22,13 +22,9 @@ export class SyncService {
     const startTime = Date.now();
 
     try {
-      // 1. First sync all projects
       await this.syncProjects();
-
-      // 2. Then sync activities
       await this.syncActivities();
 
-      // 3. Then sync time entries
       const end = new Date();
       const start = new Date(end);
       start.setFullYear(start.getFullYear() - 3);
@@ -58,17 +54,10 @@ export class SyncService {
     const startTime = Date.now();
 
     try {
-      // 1. First sync all projects
       await this.syncProjects();
-
-      // 2. Then sync activities
       await this.syncActivities();
 
-      // 3. Then sync time entries
-      const end = new Date();
-      const start = this.getMonday(end);
-
-      const entries = await this.kimai.getRecentEntries(7); // Last 7 days
+      const entries = await this.kimai.getRecentEntries(7);
       const result = await this.processEntries(entries);
 
       const duration = Date.now() - startTime;
@@ -140,80 +129,80 @@ export class SyncService {
     }
   }
 
-  private async processEntries(entries: KimaiTimeEntry[]): Promise<{
-    synced: number;
-    failed: number;
-  }> {
+  private async processEntries(entries: KimaiTimeEntry[]): Promise<{ synced: number; failed: number }> {
     let synced = 0;
     let failed = 0;
 
+    const [projects, activities] = await Promise.all([
+      this.prisma.project.findMany(),
+      this.prisma.activity.findMany(),
+    ]);
+    const projectsByKimaiId = new Map(projects.map((project) => [project.kimaiId, project]));
+    const activitiesByKimaiId = new Map(activities.map((activity) => [activity.kimaiId, activity.name]));
+
     for (const entry of entries) {
       try {
-        // 1. Find project by ID (should exist from syncProjects)
-        const project = await this.prisma.project.findUnique({
-          where: { kimaiId: entry.project },
-        });
+        const project = projectsByKimaiId.get(entry.project);
 
         if (!project) {
-          this.logger.warn(
-            `⚠️ Project ID ${entry.project} not found - skipping entry ${entry.id}`,
-          );
+          this.logger.warn(`⚠️ Project ID ${entry.project} not found - skipping entry ${entry.id}`);
           failed++;
           continue;
         }
 
-        // 2. Find activity by ID (should exist from syncActivities)
         let activityName = 'Unknown Activity';
         if (entry.activity) {
-          const activity = await this.prisma.activity.findUnique({
-            where: { kimaiId: entry.activity },
-          });
-          if (activity) {
-            activityName = activity.name;
+          const resolvedActivityName = activitiesByKimaiId.get(entry.activity);
+          if (resolvedActivityName) {
+            activityName = resolvedActivityName;
           } else {
-            this.logger.warn(
-              `⚠️ Activity ID ${entry.activity} not found in DB - using fallback`,
-            );
+            this.logger.warn(`⚠️ Activity ID ${entry.activity} not found in DB - using fallback`);
           }
         }
 
-        // 3. Upsert time entry (idempotent)
         const description = entry.description || '';
-        
-        await this.prisma.timeEntry.upsert({
+        const serializedTags = entry.tags
+          ? Array.isArray(entry.tags)
+            ? JSON.stringify(entry.tags)
+            : entry.tags
+          : null;
+
+        const timeEntry = await this.prisma.timeEntry.upsert({
           where: { kimaiId: entry.id },
           update: {
             activity: activityName,
-            description: description,
+            description,
             begin: new Date(entry.begin),
             end: new Date(entry.end),
             duration: entry.duration,
-            tags: entry.tags ? (Array.isArray(entry.tags) ? JSON.stringify(entry.tags) : entry.tags) : null,
+            tags: serializedTags,
           },
           create: {
             kimaiId: entry.id,
             projectId: project.id,
             activity: activityName,
-            description: description,
+            description,
             begin: new Date(entry.begin),
             end: new Date(entry.end),
             duration: entry.duration,
-            tags: entry.tags ? (Array.isArray(entry.tags) ? JSON.stringify(entry.tags) : entry.tags) : null,
+            tags: serializedTags,
           },
         });
 
-        // 4. Sync to Notion (async, non-blocking, only if enabled)
         if (project.notionEnabled) {
-          // Create enriched entry with resolved names for Notion
-          const enrichedEntry = {
-            ...entry,
-            projectName: project.name,
-            activityName: activityName,
-          };
-          
-          const notionResult = await this.notion.syncEntry(enrichedEntry as any);
+          const notionResult = await this.notion.syncEntry(
+            {
+              ...entry,
+              projectName: project.name,
+              activityName,
+            },
+            {
+              notionPageId: timeEntry.notionPageId,
+              notionTemplate: project.notionTemplate,
+            },
+          );
+
           if (notionResult) {
-            // Update time entry with Notion sync info
             await this.prisma.timeEntry.update({
               where: { kimaiId: entry.id },
               data: {
@@ -238,12 +227,5 @@ export class SyncService {
     }
 
     return { synced, failed };
-  }
-
-  private getMonday(date: Date): Date {
-    const d = new Date(date);
-    const day = d.getDay();
-    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-    return new Date(d.setDate(diff));
   }
 }
